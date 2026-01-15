@@ -7,50 +7,38 @@ class PosePainter extends CustomPainter {
   final List<Pose> poses;
   final Size imageSize;
   final InputImageRotation rotation;
+  final bool mirror;
 
   PosePainter({
     required this.poses,
     required this.imageSize,
     required this.rotation,
+    this.mirror = false,
   });
 
-  // Соединения скелета (как в Camerawork/MainActivity.kt)
+  // Соединения скелета для ML Kit Pose Detection
   static const List<List<int>> _connections = [
-    // Торс
-    [11, 12], // Плечи
-    [11, 23], // Левое плечо - левое бедро
-    [12, 24], // Правое плечо - правое бедро
-    [23, 24], // Бедра
+    // Торс (используем правильные индексы ML Kit)
+    [5, 6],   // Левое плечо - правое плечо
+    [5, 11],  // Левое плечо - левое бедро  
+    [6, 12],  // Правое плечо - правое бедро
+    [11, 12], // Левое бедро - правое бедро
     
     // Левая рука
-    [11, 13], // Плечо - локоть
-    [13, 15], // Локоть - запястье
-    [15, 17], // Запястье - большой палец
-    [15, 19], // Запястье - указательный палец
-    [15, 21], // Запястье - мизинец
-    [17, 19], // Большой - указательный
+    [5, 7],   // Левое плечо - левый локоть
+    [7, 9],   // Левый локоть - левое запястье
     
-    // Правая рука
-    [12, 14], // Плечо - локоть
-    [14, 16], // Локоть - запястье
-    [16, 18], // Запястье - большой палец
-    [16, 20], // Запястье - указательный палец
-    [16, 22], // Запястье - мизинец
-    [18, 20], // Большой - указательный
+    // Правая рука  
+    [6, 8],   // Правое плечо - правый локоть
+    [8, 10],  // Правый локоть - правое запястье
     
     // Левая нога
-    [23, 25], // Бедро - колено
-    [25, 27], // Колено - лодыжка
-    [27, 29], // Лодыжка - пятка
-    [29, 31], // Пятка - носок
-    [27, 31], // Лодыжка - носок
+    [11, 13], // Левое бедро - левое колено
+    [13, 15], // Левое колено - левая лодыжка
     
     // Правая нога
-    [24, 26], // Бедро - колено
-    [26, 28], // Колено - лодыжка
-    [28, 30], // Лодыжка - пятка
-    [30, 32], // Пятка - носок
-    [28, 32], // Лодыжка - носок
+    [12, 14], // Правое бедро - правое колено  
+    [14, 16], // Правое колено - правая лодыжка
   ];
 
   @override
@@ -66,55 +54,83 @@ class PosePainter extends CustomPainter {
       ..color = Colors.red; // Красные точки как в Camerawork
 
     for (final pose in poses) {
-      final landmarks = pose.landmarks.values.toList();
+      final landmarks = pose.landmarks;
+      print('🎨 Drawing pose with ${landmarks.length} landmarks');
       
-      // Рисуем соединения (линии скелета)
-      for (final connection in _connections) {
-        if (connection[0] < landmarks.length && connection[1] < landmarks.length) {
-          final start = landmarks[connection[0]];
-          final end = landmarks[connection[1]];
-          
-          // Проверяем видимость обеих точек (порог 0.5 как в Camerawork)
-          if (start.likelihood > 0.5 && end.likelihood > 0.5) {
-            final startPoint = _translatePoint(start.x, start.y, size);
-            final endPoint = _translatePoint(end.x, end.y, size);
-            
-            canvas.drawLine(startPoint, endPoint, linePaint);
-          }
-        }
-      }
+      // Рисуем соединения (линии скелета) используя типы landmarks
+      _drawConnection(canvas, landmarks, PoseLandmarkType.leftShoulder, PoseLandmarkType.rightShoulder, linePaint, size);
+      _drawConnection(canvas, landmarks, PoseLandmarkType.leftShoulder, PoseLandmarkType.leftHip, linePaint, size);
+      _drawConnection(canvas, landmarks, PoseLandmarkType.rightShoulder, PoseLandmarkType.rightHip, linePaint, size);
+      _drawConnection(canvas, landmarks, PoseLandmarkType.leftHip, PoseLandmarkType.rightHip, linePaint, size);
+      
+      // Левая рука
+      _drawConnection(canvas, landmarks, PoseLandmarkType.leftShoulder, PoseLandmarkType.leftElbow, linePaint, size);
+      _drawConnection(canvas, landmarks, PoseLandmarkType.leftElbow, PoseLandmarkType.leftWrist, linePaint, size);
+      
+      // Правая рука
+      _drawConnection(canvas, landmarks, PoseLandmarkType.rightShoulder, PoseLandmarkType.rightElbow, linePaint, size);
+      _drawConnection(canvas, landmarks, PoseLandmarkType.rightElbow, PoseLandmarkType.rightWrist, linePaint, size);
+      
+      // Левая нога
+      _drawConnection(canvas, landmarks, PoseLandmarkType.leftHip, PoseLandmarkType.leftKnee, linePaint, size);
+      _drawConnection(canvas, landmarks, PoseLandmarkType.leftKnee, PoseLandmarkType.leftAnkle, linePaint, size);
+      
+      // Правая нога
+      _drawConnection(canvas, landmarks, PoseLandmarkType.rightHip, PoseLandmarkType.rightKnee, linePaint, size);
+      _drawConnection(canvas, landmarks, PoseLandmarkType.rightKnee, PoseLandmarkType.rightAnkle, linePaint, size);
       
       // Рисуем точки суставов поверх линий
-      for (final landmark in landmarks) {
+      for (final landmark in landmarks.values) {
         if (landmark.likelihood > 0.5) {
           final point = _translatePoint(landmark.x, landmark.y, size);
-          canvas.drawCircle(point, 10, pointPaint); // Радиус 10 как в Camerawork
+          canvas.drawCircle(point, 8, pointPaint);
         }
       }
     }
   }
 
-  Offset _translatePoint(double x, double y, Size size) {
-    // Для фронтальной камеры координаты нужно масштабировать и отзеркалить
-    // ML Kit возвращает координаты в пикселях изображения
+  void _drawConnection(Canvas canvas, Map<PoseLandmarkType, PoseLandmark> landmarks, 
+                      PoseLandmarkType start, PoseLandmarkType end, Paint paint, Size size) {
+    final startLandmark = landmarks[start];
+    final endLandmark = landmarks[end];
     
-    if (imageSize.width == 0 || imageSize.height == 0) {
-      return Offset(x, y);
+    if (startLandmark != null && endLandmark != null && 
+        startLandmark.likelihood > 0.5 && endLandmark.likelihood > 0.5) {
+      final startPoint = _translatePoint(startLandmark.x, startLandmark.y, size);
+      final endPoint = _translatePoint(endLandmark.x, endLandmark.y, size);
+      
+      canvas.drawLine(startPoint, endPoint, paint);
     }
-    
-    // Масштабируем координаты из размера изображения в размер виджета
-    final scaleX = size.width / imageSize.width;
-    final scaleY = size.height / imageSize.height;
-    
-    // Применяем масштабирование
-    final scaledX = x * scaleX;
-    final scaledY = y * scaleY;
-    
-    // Отзеркаливаем X координату для соответствия отзеркаленной камере
-    // (1f - landmark.x()) * size.width как в Camerawork
-    final mirroredX = size.width - scaledX;
+  }
 
-    return Offset(mirroredX, scaledY);
+  Offset _translatePoint(double x, double y, Size size) {
+    if (imageSize.width == 0 || imageSize.height == 0) {
+      return Offset.zero;
+    }
+
+    // ML Kit возвращает координаты в пикселях "upright" изображения, с учётом rotation,
+    // но при отрисовке важно правильно выбрать ширину/высоту входного кадра.
+    // Для rotation 90/270 ширина и высота меняются местами.
+    final rotatedImageWidth = (rotation == InputImageRotation.rotation90deg ||
+            rotation == InputImageRotation.rotation270deg)
+        ? imageSize.height
+        : imageSize.width;
+    final rotatedImageHeight = (rotation == InputImageRotation.rotation90deg ||
+            rotation == InputImageRotation.rotation270deg)
+        ? imageSize.width
+        : imageSize.height;
+
+    final scaleX = size.width / rotatedImageWidth;
+    final scaleY = size.height / rotatedImageHeight;
+
+    double dx = x * scaleX;
+    final double dy = y * scaleY;
+
+    if (mirror) {
+      dx = size.width - dx;
+    }
+
+    return Offset(dx, dy);
   }
 
   @override

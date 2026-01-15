@@ -3,6 +3,7 @@ import 'package:fitmonster/features/exercises/domain/models/exercise.dart';
 import 'package:fitmonster/features/exercises/data/exercises_database.dart';
 import 'package:fitmonster/features/exercises/presentation/pages/exercise_camera_page.dart';
 import 'package:fitmonster/features/exercises/presentation/pages/demo_camera_page.dart';
+import 'package:fitmonster/features/exercises/presentation/pages/pose_test_page.dart';
 import 'package:fitmonster/features/exercises/presentation/widgets/muscle_diagram.dart';
 import 'package:fitmonster/core/theme/app_theme.dart';
 
@@ -74,6 +75,16 @@ class _ExercisesPageState extends State<ExercisesPage> {
       appBar: AppBar(
         title: const Text('Упражнения'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.bug_report),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const PoseTestPage()),
+              );
+            },
+            tooltip: 'Тест скелета',
+          ),
           IconButton(
             icon: const Icon(Icons.filter_list),
             onPressed: _showFilterDialog,

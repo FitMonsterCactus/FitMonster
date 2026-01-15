@@ -12,10 +12,12 @@ import 'dart:typed_data';
 
 class ExerciseCameraPage extends StatefulWidget {
   final Exercise exercise;
+  final bool autostart;
 
   const ExerciseCameraPage({
     super.key,
     required this.exercise,
+    this.autostart = false,
   });
 
   @override
@@ -31,6 +33,10 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
   double _formScore = 0.0;
   String _feedback = 'Встаньте в кадр';
   Timer? _feedbackTimer;
+  
+  // Параметры входного изображения для корректной отрисовки позы
+  InputImageRotation _inputImageRotation = InputImageRotation.rotation0deg;
+  Size _inputImageSize = Size.zero;
   
   // Дополнительные поля для улучшенного UI
   DateTime? _workoutStartTime;
@@ -53,6 +59,8 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
   // Состояние для подсчета повторений
   bool _isInDownPosition = false;
   DateTime? _lastRepTime;
+  
+  DateTime _lastPoseLog = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
@@ -114,6 +122,14 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
       }
       
       print('✅ Camera initialized: ${frontCamera.lensDirection}, resolution: medium (640x480)');
+
+      if (mounted && widget.autostart) {
+        // Даем UI дорисоваться и запускаем поток кадров
+        Future.microtask(() {
+          if (!mounted || _isRecording) return;
+          _startExercise();
+        });
+      }
     } catch (e) {
       print('❌ Camera initialization error: $e');
       setState(() {
@@ -188,7 +204,6 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
         _isProcessing = false;
         print('❌ Error in image processing: $e');
       });
-      
       _frameCount++;
     });
   }
@@ -202,15 +217,22 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
     try {
       _updateFpsCounter();
       
-      // Создаем InputImage из CameraImage
-      final inputImage = _inputImageFromCameraImage(image);
+      final inputImage = _createInputImageFromCameraImage(image);
       if (inputImage == null) {
         print('❌ Failed to create InputImage');
         return;
       }
       
-      // Обрабатываем изображение с ML Kit (асинхронно, как в MediaPipe)
+      // Обрабатываем изображение с ML Kit
       final poses = await _poseDetector!.processImage(inputImage);
+      final now = DateTime.now();
+      if (now.difference(_lastPoseLog).inMilliseconds >= 1000) {
+        final landmarksCount = poses.isNotEmpty ? poses.first.landmarks.length : 0;
+        print(
+          '🧍 poses=${poses.length} landmarks=$landmarksCount rotation=$_inputImageRotation size=$_inputImageSize fps=${_currentFps.toStringAsFixed(1)}',
+        );
+        _lastPoseLog = now;
+      }
       
       if (mounted) {
         setState(() {
@@ -221,6 +243,8 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
           } else {
             final pose = poses.first;
             final confidence = _calculatePoseConfidence(pose);
+            
+            print('🔍 Pose confidence: $confidence%');
             
             if (confidence < 50) {
               _feedback = 'Улучшите освещение и встаньте ближе';
@@ -236,75 +260,116 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
     }
   }
 
-  InputImage? _inputImageFromCameraImage(CameraImage image) {
-    if (_cameraController == null) {
-      print('❌ Camera controller is null');
-      return null;
-    }
+  InputImage? _createInputImageFromCameraImage(CameraImage image) {
+    if (_cameraController == null) return null;
 
-    // Получаем информацию о камере
-    final camera = _cameraController!.description;
-    final sensorOrientation = camera.sensorOrientation;
-    
-    // Определяем поворот изображения
-    InputImageRotation rotation;
-    if (camera.lensDirection == CameraLensDirection.front) {
-      // Для фронтальной камеры
-      rotation = InputImageRotation.rotation270deg;
-    } else {
-      // Для задней камеры
-      rotation = InputImageRotation.rotation90deg;
-    }
-
-    // Определяем формат изображения
-    InputImageFormat? format;
-    switch (image.format.raw) {
-      case 35: // ImageFormat.YUV_420_888 on Android
-        format = InputImageFormat.yuv420;
-        break;
-      case 17: // ImageFormat.NV21 on Android
-        format = InputImageFormat.nv21;
-        break;
-      case 875704438: // kCVPixelFormatType_420YpCbCr8BiPlanarFullRange on iOS
-      case 875704422: // kCVPixelFormatType_420YpCbCr8Planar on iOS
-        format = InputImageFormat.yuv420;
-        break;
-      default:
-        // Используем YUV420 как fallback
-        format = InputImageFormat.yuv420;
-    }
-
-    // Получаем данные изображения
-    if (image.planes.isEmpty) {
-      print('❌ No image planes');
-      return null;
-    }
-    
     try {
-      // Создаем InputImage из байтов (как BitmapImageBuilder в MediaPipe)
-      final inputImage = InputImage.fromBytes(
-        bytes: _concatenatePlanes(image.planes),
-        metadata: InputImageMetadata(
-          size: Size(image.width.toDouble(), image.height.toDouble()),
-          rotation: rotation,
-          format: format,
-          bytesPerRow: image.planes.first.bytesPerRow,
-        ),
-      );
-      
-      return inputImage;
+      final rotation = _getInputImageRotation();
+      final size = Size(image.width.toDouble(), image.height.toDouble());
+
+      // Сохраняем для отрисовки оверлея
+      if (_inputImageSize != size || _inputImageRotation != rotation) {
+        _inputImageSize = size;
+        _inputImageRotation = rotation;
+      }
+
+      final formatGroup = image.format.group;
+
+      // Самый частый кейс на Android/эмуляторе: YUV420 -> NV21
+      if (formatGroup == ImageFormatGroup.yuv420) {
+        final bytes = _yuv420ToNv21(image);
+        return InputImage.fromBytes(
+          bytes: bytes,
+          metadata: InputImageMetadata(
+            size: size,
+            rotation: rotation,
+            format: InputImageFormat.nv21,
+            bytesPerRow: image.width,
+          ),
+        );
+      }
+
+      // Часто на iOS: BGRA8888
+      if (formatGroup == ImageFormatGroup.bgra8888) {
+        final plane = image.planes.first;
+        return InputImage.fromBytes(
+          bytes: plane.bytes,
+          metadata: InputImageMetadata(
+            size: size,
+            rotation: rotation,
+            format: InputImageFormat.bgra8888,
+            bytesPerRow: plane.bytesPerRow,
+          ),
+        );
+      }
+
+      print('❌ Unsupported image format group: $formatGroup');
+      return null;
     } catch (e) {
       print('❌ Error creating InputImage: $e');
       return null;
     }
   }
 
-  Uint8List _concatenatePlanes(List<Plane> planes) {
-    final allBytes = <int>[];
-    for (final plane in planes) {
-      allBytes.addAll(plane.bytes);
+  InputImageRotation _getInputImageRotation() {
+    final sensorOrientation = _cameraController?.description.sensorOrientation ?? 0;
+    switch (sensorOrientation) {
+      case 90:
+        return InputImageRotation.rotation90deg;
+      case 180:
+        return InputImageRotation.rotation180deg;
+      case 270:
+        return InputImageRotation.rotation270deg;
+      case 0:
+      default:
+        return InputImageRotation.rotation0deg;
     }
-    return Uint8List.fromList(allBytes);
+  }
+
+  Uint8List _yuv420ToNv21(CameraImage image) {
+    final width = image.width;
+    final height = image.height;
+
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+
+    final yBytes = yPlane.bytes;
+    final uBytes = uPlane.bytes;
+    final vBytes = vPlane.bytes;
+
+    final yRowStride = yPlane.bytesPerRow;
+    final yPixelStride = yPlane.bytesPerPixel ?? 1;
+
+    final uRowStride = uPlane.bytesPerRow;
+    final uPixelStride = uPlane.bytesPerPixel ?? 1;
+
+    final vRowStride = vPlane.bytesPerRow;
+    final vPixelStride = vPlane.bytesPerPixel ?? 1;
+
+    final out = Uint8List(width * height + (width * height ~/ 2));
+
+    // Y
+    int outIndex = 0;
+    for (int y = 0; y < height; y++) {
+      int yRow = yRowStride * y;
+      for (int x = 0; x < width; x++) {
+        out[outIndex++] = yBytes[yRow + x * yPixelStride];
+      }
+    }
+
+    // VU (NV21)
+    for (int y = 0; y < height ~/ 2; y++) {
+      for (int x = 0; x < width ~/ 2; x++) {
+        final uIndex = (uRowStride * y) + x * uPixelStride;
+        final vIndex = (vRowStride * y) + x * vPixelStride;
+        // NV21 = V then U
+        out[outIndex++] = vBytes[vIndex];
+        out[outIndex++] = uBytes[uIndex];
+      }
+    }
+
+    return out;
   }
 
   double _calculatePoseConfidence(Pose pose) {
@@ -489,7 +554,6 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
   }
 
   void _updateFpsCounter() {
-    _frameCount++;
     final now = DateTime.now();
     final timeDiff = now.difference(_lastFpsUpdate).inMilliseconds;
     
@@ -555,17 +619,19 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
                   // Превью камеры
                   if (_cameraController != null && _cameraController!.value.isInitialized)
                     Positioned.fill(
-                      child: Transform(
-                        alignment: Alignment.center,
-                        transform: Matrix4.identity()..scale(-1.0, 1.0, 1.0), // Отзеркаливаем по горизонтали
-                        child: FittedBox(
-                          fit: BoxFit.cover, // Заполняем контейнер без растяжения
-                          child: SizedBox(
-                            width: _cameraController!.value.previewSize!.height,
-                            height: _cameraController!.value.previewSize!.width,
-                            child: CameraPreview(_cameraController!),
-                          ),
-                        ),
+                      child: Builder(
+                        builder: (context) {
+                          final preview = FittedBox(
+                            fit: BoxFit.cover,
+                            child: SizedBox(
+                              width: _cameraController!.value.previewSize!.height,
+                              height: _cameraController!.value.previewSize!.width,
+                              child: CameraPreview(_cameraController!),
+                            ),
+                          );
+                          // Камера в исходном состоянии: НЕ зеркалим превью.
+                          return preview;
+                        },
                       ),
                     )
                   else
@@ -579,11 +645,16 @@ class _ExerciseCameraPageState extends State<ExerciseCameraPage> {
                       child: CustomPaint(
                         painter: PosePainter(
                           poses: _poses,
-                          imageSize: Size(
-                            _cameraController?.value.previewSize?.width ?? 480,
-                            _cameraController?.value.previewSize?.height ?? 640,
-                          ),
-                          rotation: InputImageRotation.rotation270deg,
+                          imageSize: _inputImageSize == Size.zero
+                              ? Size(
+                                  _cameraController?.value.previewSize?.width ?? 480,
+                                  _cameraController?.value.previewSize?.height ?? 640,
+                                )
+                              : _inputImageSize,
+                          rotation: _inputImageRotation,
+                          // Зеркалим только отрисовку "скелета"
+                          mirror: _cameraController?.description.lensDirection ==
+                              CameraLensDirection.front,
                         ),
                       ),
                     ),
