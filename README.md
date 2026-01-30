@@ -1,4 +1,4 @@
-# fitmonster
+# FitMonster
 
 A new Flutter project.
 
